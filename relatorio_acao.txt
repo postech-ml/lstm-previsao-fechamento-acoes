@@ -1,0 +1,15 @@
+Relatório da Ação - Gerado em 2024-12-01 20:44:17
+==================================================
+
+Ticker: AMBA
+Data Último Preço: 2024-11-29
+Último Preço: $71.55
+Variação 5d: 12.46%
+Volume Médio (5d): 1,987,480
+Preço Máximo (5d): $81.32
+Preço Mínimo (5d): $61.39
+Nome Empresa: Ambarella, Inc.
+Setor: Technology
+Indústria: Semiconductor Equipment & Materials
+Market Cap: $2,989,924,352.00
+Volume Médio (3m): 0

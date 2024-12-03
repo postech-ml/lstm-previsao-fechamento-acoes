@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Análise de Ações</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <style>
+        .container { 
+            margin-top: 30px; 
+            margin-bottom: 30px;
+        }
+        
+        .stock-info, .prediction-info { 
+            margin-top: 20px; 
+        }
+        
+        img { 
+            max-width: 100%; 
+            height: auto; 
+        }
+        
+        .loading-spinner {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+        
+        .loading-spinner i {
+            animation: spin 1s infinite linear;
+        }
+        
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        
+        .prediction-status {
+            display: none;
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 5px;
+        }
+        
+        .timestamp {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        .model-warning {
+            display: none;
+            margin-top: 15px;
+        }
+
+        .card {
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        .card-body {
+            padding: 25px;
+        }
+
+        .table {
+            margin-top: 15px;
+        }
+
+        .alert {
+            margin-bottom: 20px;
+        }
+
+        .btn {
+            padding: 8px 20px;
+        }
+
+        .nav-buttons {
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="nav-buttons">
+            <a href="/treinamentomodelo" class="btn btn-outline-primary">
+                <i class="fas fa-cogs"></i> Painel de Treinamento
+            </a>
+            <a href="/docs" target="_blank" class="btn btn-outline-info">
+                <i class="fas fa-book"></i> Documentação API
+            </a>
+        </div>
+
+        <h1 class="mb-4">Análise de Ações</h1>
+        
+        <div class="card mb-4">
+            <div class="card-body">
+                <h3>Informações da Ação</h3>
+                <p class="text-muted mb-4">
+                    Consulte informações detalhadas de qualquer ação disponível no Yahoo Finance.
+                </p>
+                <form id="stockForm" class="mb-3">
+                    <div class="form-group">
+                        <label for="ticker" class="form-label">Ticker:</label>
+                        <input type="text" 
+                               class="form-control" 
+                               id="ticker" 
+                               name="ticker" 
+                               value="AMBA"
+                               placeholder="Ex: AAPL, MSFT, GOOGL">
+                        <small class="form-text text-muted">
+                            Digite o código da ação (ticker) que deseja analisar.
+                        </small>
+                    </div>
+                    <button type="submit" class="btn btn-primary mt-3">
+                        <i class="fas fa-search"></i> Buscar Informações
+                    </button>
+                </form>
+                
+                <div class="loading-spinner" id="stockLoading">
+                    <i class="fas fa-spinner fa-2x"></i>
+                    <p>Buscando informações...</p>
+                </div>
+                
+                <div id="stockInfo" class="stock-info"></div>
+                <div id="stockGraph" class="mt-3"></div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <div class="card-body">
+                <h3>Previsão de Preço</h3>
+                <div class="alert alert-warning">
+                    <h5><i class="fas fa-info-circle"></i> Importante!</h5>
+                    <p class="mb-0">
+                        O modelo de previsão foi treinado exclusivamente com dados históricos da empresa 
+                        <strong>Ambarella Inc. (AMBA)</strong>. Portanto, as previsões estão disponíveis 
+                        apenas para esta empresa.
+                    </p>
+                </div>
+
+                <div class="alert alert-danger model-warning" id="wrongTickerWarning">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    Para realizar previsões, por favor, digite o ticker AMBA acima.
+                </div>
+
+                <form id="predictionForm" class="mb-3">
+                    <button type="submit" class="btn btn-success mt-3" id="predictButton">
+                        <i class="fas fa-chart-line"></i> Fazer Previsão
+                    </button>
+                </form>
+                
+                <div class="loading-spinner" id="predictionLoading">
+                    <i class="fas fa-spinner fa-2x"></i>
+                    <p>Realizando previsão...</p>
+                </div>
+                
+                <div class="prediction-status alert alert-success" id="predictionStatus">
+                    <i class="fas fa-check-circle"></i>
+                    <span class="status-text">Previsão finalizada com sucesso!</span>
+                    <div class="timestamp"></div>
+                </div>
+                
+                <div id="predictionInfo" class="prediction-info"></div>
+                <div id="predictionGraph" class="mt-3"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script>
+        $(document).ready(function() {
+            function updatePredictionInterface() {
+                let ticker = $('#ticker').val().toUpperCase();
+                let isPredictionEnabled = ticker === 'AMBA';
+                
+                $('#wrongTickerWarning').toggle(!isPredictionEnabled);
+                $('#predictButton').prop('disabled', !isPredictionEnabled);
+                
+                if (!isPredictionEnabled) {
+                    $('#predictionInfo').hide();
+                    $('#predictionGraph').hide();
+                    $('#predictionStatus').hide();
+                }
+            }
+
+            $('#ticker').on('input', function() {
+                updatePredictionInterface();
+            });
+
+            updatePredictionInterface();
+
+            $('#stockForm').submit(function(e) {
+                e.preventDefault();
+                $('#stockLoading').show();
+                $('#stockInfo').hide();
+                $('#stockGraph').hide();
+                
+                $.ajax({
+                    url: '/obter_info_acao',
+                    method: 'POST',
+                    data: $(this).serialize(),
+                    success: function(response) {
+                        $('#stockLoading').hide();
+                        $('#stockInfo').show();
+                        $('#stockGraph').show();
+                        
+                        if (response.error) {
+                            $('#stockInfo').html('<div class="alert alert-danger">' + response.error + '</div>');
+                            return;
+                        }
+                        
+                        let html = '<table class="table">';
+                        for (let key in response.stock_info) {
+                            html += `<tr><td><strong>${key}:</strong></td><td>${response.stock_info[key]}</td></tr>`;
+                        }
+                        html += '</table>';
+                        
+                        $('#stockInfo').html(html);
+                        $('#stockGraph').html('<img src="data:image/png;base64,' + response.graph + '">');
+                        
+                        updatePredictionInterface();
+                    }
+                });
+            });
+            
+            $('#predictionForm').submit(function(e) {
+                e.preventDefault();
+                if ($('#ticker').val().toUpperCase() !== 'AMBA') {
+                    return;
+                }
+                
+                $('#predictionLoading').show();
+                $('#predictionStatus').hide();
+                $('#predictionInfo').hide();
+                $('#predictionGraph').hide();
+                
+                $.ajax({
+                    url: '/fazer_previsao',
+                    method: 'POST',
+                    data: $(this).serialize(),
+                    success: function(response) {
+                        $('#predictionLoading').hide();
+                        $('#predictionInfo').show();
+                        $('#predictionGraph').show();
+                        
+                        if (response.error) {
+                            $('#predictionInfo').html('<div class="alert alert-danger">' + response.error + '</div>');
+                            $('#predictionStatus')
+                                .removeClass('alert-success')
+                                .addClass('alert-danger')
+                                .show()
+                                .find('.status-text')
+                                .text('Erro ao realizar previsão: ' + response.error);
+                            return;
+                        }
+                        
+                        let html = `
+                            <table class="table">
+                                <tr><td><strong>Último Preço:</strong></td><td>${response.ultimo_preco}</td></tr>
+                                <tr><td><strong>Previsão:</strong></td><td>${response.prediction}</td></tr>
+                                <tr><td><strong>Variação:</strong></td><td>${response.variacao}</td></tr>
+                            </table>
+                        `;
+                        
+                        $('#predictionInfo').html(html);
+                        $('#predictionGraph').html('<img src="data:image/png;base64,' + response.graph + '">');
+                        
+                        $('#predictionStatus')
+                            .removeClass('alert-danger')
+                            .addClass('alert-success')
+                            .show()
+                            .find('.timestamp')
+                            .text('Concluído em: ' + new Date().toLocaleString());
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html>
