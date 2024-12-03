@@ -4,7 +4,7 @@ Um aplicativo web que utiliza redes neurais LSTM (Long Short-Term Memory) para p
 
 ## Sobre o Projeto
 
-### Autoria
+### Autorias
 **Grupo 60 - Pós Tech FIAP - Engenharia de Machine Learning**
 
 ### Contexto Acadêmico
