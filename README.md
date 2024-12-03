@@ -1,1 +1,0 @@
-# lstm-previsao-fechamento-acoes
