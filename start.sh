@@ -1,5 +1,13 @@
+```bash
 #!/bin/bash
 
+# Iniciar Prometheus em background
+/usr/bin/prometheus --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus &
+
+# Aguardar Prometheus iniciar
+sleep 5
+
+# Iniciar aplicação principal
 echo "Iniciando treinamento do modelo..."
 python criacao_modelo.py
 

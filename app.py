@@ -13,13 +13,42 @@ import threading
 import subprocess
 from datetime import datetime
 import shutil
+import psutil
+from prometheus_client import Counter, Histogram, Gauge, start_http_server
+from monitoramento import (
+    ModelMonitor, 
+    monitor_prediction, 
+    get_resource_usage,
+    PREDICTION_COUNTER, 
+    PREDICTION_LATENCY,
+    MODEL_ACCURACY
+)
+import logging
+from functools import wraps
+import time
+
+# Configurar logging
+logging.basicConfig(
+    filename='app.log',
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# Instanciar monitor
+model_monitor = ModelMonitor()
+
+# Métricas adicionais
+REQUEST_LATENCY = Histogram('http_request_latency_seconds', 'HTTP request latency', ['endpoint'])
+ERROR_COUNTER = Counter('http_request_errors_total', 'Total HTTP request errors', ['endpoint'])
+ACTIVE_REQUESTS = Gauge('http_requests_active', 'Number of active HTTP requests')
+
 # Caminho da pasta que será zipada
-FOLDER_TO_ZIP       = 'mlruns'
-FOLDER_TO_SAVE_ZIP  = 'Modelos_Grupo_60'
-ZIP_FILE_NAME       = FOLDER_TO_SAVE_ZIP + '.zip'
+FOLDER_TO_ZIP = 'mlruns'
+FOLDER_TO_SAVE_ZIP = 'Modelos_Grupo_60'
+ZIP_FILE_NAME = FOLDER_TO_SAVE_ZIP + '.zip'
 
 # Configuração do Swagger
 swagger_config = {
@@ -55,11 +84,36 @@ template = {
         {
             "name": "treinamento",
             "description": "Operações relacionadas ao treinamento do modelo"
+        },
+        {
+            "name": "monitoramento",
+            "description": "Endpoints de monitoramento e métricas"
         }
     ]
 }
 
 swagger = Swagger(app, config=swagger_config, template=template)
+
+# Decorator para monitorar endpoints
+def monitor_endpoint(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        ACTIVE_REQUESTS.inc()
+        start_time = time.time()
+        endpoint = request.endpoint
+        
+        try:
+            response = f(*args, **kwargs)
+            REQUEST_LATENCY.labels(endpoint=endpoint).observe(time.time() - start_time)
+            return response
+        except Exception as e:
+            ERROR_COUNTER.labels(endpoint=endpoint).inc()
+            logger.error(f"Erro no endpoint {endpoint}: {str(e)}")
+            raise
+        finally:
+            ACTIVE_REQUESTS.dec()
+            
+    return decorated_function
 
 # Status do treinamento
 training_status = {
@@ -71,189 +125,143 @@ training_status = {
     "metrics": None
 }
 
-def execute_model_training():
-    """Executa o treinamento do modelo"""
-    global training_status
-    
+@app.route('/health')
+@monitor_endpoint
+def health_check():
+    """Verificar saúde da aplicação"""
     try:
-        training_status["start_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        training_status["is_running"] = True
+        # Verificar conexão com MLflow
+        mlflow.get_tracking_uri()
         
-        result = subprocess.run(
-            [sys.executable, 'criacao_modelo.py'],
-            capture_output=True,
-            text=True
-        )
+        # Verificar recursos do sistema
+        resources = get_resource_usage()
         
-        for line in result.stdout.split('\n'):
-            if "O run_id é:" in line:
-                training_status["run_id"] = line.split(":")[1].strip()
-            elif "Métricas de Avaliação:" in line:
-                metrics_lines = result.stdout.split('\n')[result.stdout.split('\n').index(line)+1:result.stdout.split('\n').index(line)+3]
-                training_status["metrics"] = {
-                    'train': metrics_lines[0].split("Treino -")[1].strip(),
-                    'test': metrics_lines[1].split("Teste -")[1].strip()
-                }
-        
-        if result.returncode != 0:
-            raise Exception(f"Erro no treinamento: {result.stderr}")
-        
-        training_status["error"] = None
-        
+        return jsonify({
+            'status': 'healthy',
+            'timestamp': datetime.now().isoformat(),
+            'resources': resources,
+            'active_requests': ACTIVE_REQUESTS._value.get(),
+        })
     except Exception as e:
-        training_status["error"] = str(e)
-    finally:
-        training_status["is_running"] = False
-        training_status["end_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        logger.error(f"Erro no health check: {str(e)}")
+        return jsonify({
+            'status': 'unhealthy',
+            'error': str(e)
+        }), 500
+
+@app.route('/metrics/model')
+@monitor_endpoint
+def model_metrics():
+    """Retornar métricas do modelo"""
+    try:
+        metrics = model_monitor.calculate_metrics()
+        return jsonify(metrics)
+    except Exception as e:
+        logger.error(f"Erro ao obter métricas do modelo: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/metrics/system')
+@monitor_endpoint
+def system_metrics():
+    """Retornar métricas do sistema"""
+    try:
+        return jsonify(get_resource_usage())
+    except Exception as e:
+        logger.error(f"Erro ao obter métricas do sistema: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/')
+@monitor_endpoint
 def pagina_inicial():
-    """Renderiza a página inicial"""
+    """Renderizar a página inicial"""
     return render_template('index.html')
 
-@app.route('/zipar-pasta', methods=['GET'])
-def zip_folder():
-    try:
-        # Apaga o arquivo zip antigo, se existir
-        if os.path.exists(ZIP_FILE_NAME):
-            os.remove(ZIP_FILE_NAME)
-
-        # Cria o arquivo zip
-        shutil.make_archive(FOLDER_TO_SAVE_ZIP, 'zip', FOLDER_TO_ZIP)
-        
-        return jsonify({"zipFileName": ZIP_FILE_NAME}), 200
-
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
-
-@app.route('/download/<file_name>', methods=['GET'])
-def download_file(file_name):
-    try:
-        # Caminho completo do arquivo
-        file_path = os.path.join(os.getcwd(), file_name)
-
-        if not os.path.exists(file_path):
-            return jsonify({"message": "Arquivo não encontrado"}), 404
-
-        # Envia o arquivo para download
-        return send_file(file_path, as_attachment=True)
-
-    except Exception as e:
-        return jsonify({"message": str(e)}), 500
-
 @app.route('/obter_info_acao', methods=['POST'])
+@monitor_endpoint
 @swag_from({
     'tags': ['ações'],
     'summary': 'Obtém informações de uma ação',
-    'description': 'Retorna informações detalhadas e gráfico de uma ação específica',
     'parameters': [
         {
             'name': 'ticker',
             'in': 'formData',
             'type': 'string',
             'required': True,
-            'default': 'AMBA',
-            'description': 'Código da ação'
+            'default': 'AMBA'
         }
-    ],
-    'responses': {
-        200: {
-            'description': 'Informações obtidas com sucesso'
-        },
-        400: {
-            'description': 'Erro na requisição'
-        }
-    }
+    ]
 })
 def obter_informacoes_acao():
-    ticker = request.form.get('ticker', 'AMBA')
-    stock_info, dados_recentes = get_stock_info(ticker)
-    
-    if stock_info is None:
-        return jsonify({'error': 'Não foi possível obter informações da ação'}), 400
-    
-    plt = plot_recent_prices(dados_recentes, 
-                           f"Preços Recentes - {stock_info['Nome Empresa']} ({ticker})")
-    
-    img = BytesIO()
-    plt.savefig(img, format='png', bbox_inches='tight')
-    img.seek(0)
-    graph_url = base64.b64encode(img.getvalue()).decode()
-    plt.close()
-    
-    return jsonify({
-        'stock_info': stock_info,
-        'graph': graph_url
-    })
-
-@app.route('/fazer_previsao', methods=['POST'])
-@swag_from({
-    'tags': ['ações'],
-    'summary': 'Realiza previsão de preço',
-    'description': 'Faz uma previsão do próximo preço da ação usando o modelo LSTM',
-    'parameters': [
-        {
-            'name': 'ticker',
-            'in': 'formData',
-            'type': 'string',
-            'required': True,
-            'default': 'AMBA',
-            'description': 'Código da ação'
-        }
-    ],
-    'responses': {
-        200: {
-            'description': 'Previsão realizada com sucesso'
-        },
-        400: {
-            'description': 'Erro na requisição'
-        }
-    }
-})
-def fazer_previsao_acao():
     try:
         ticker = request.form.get('ticker', 'AMBA')
-        sequence_length = int(request.form.get('sequence_length', 60))
+        stock_info, dados_recentes = get_stock_info(ticker)
         
-        prediction, ultimo_preco, variacao = make_prediction()
+        if stock_info is None:
+            raise ValueError('Não foi possível obter informações da ação')
         
-        if prediction is None:
-            return jsonify({'error': 'Erro ao fazer previsão'}), 400
+        plt = plot_recent_prices(dados_recentes, 
+                               f"Preços Recentes - {stock_info['Nome Empresa']} ({ticker})")
         
         img = BytesIO()
-        matplotlib.pyplot.savefig(img, format='png', bbox_inches='tight')
+        plt.savefig(img, format='png', bbox_inches='tight')
         img.seek(0)
         graph_url = base64.b64encode(img.getvalue()).decode()
-        matplotlib.pyplot.close()
+        plt.close()
         
         return jsonify({
-            'prediction': f"${prediction:.2f}",
-            'ultimo_preco': f"${ultimo_preco:.2f}",
-            'variacao': f"{variacao:.2f}%",
+            'stock_info': stock_info,
             'graph': graph_url
         })
         
     except Exception as e:
+        logger.error(f"Erro ao obter informações da ação: {str(e)}")
+        return jsonify({'error': str(e)}), 400
+
+@app.route('/fazer_previsao', methods=['POST'])
+@monitor_endpoint
+@monitor_prediction
+@swag_from({
+    'tags': ['ações'],
+    'summary': 'Realiza previsão de preço'
+})
+def fazer_previsao_acao():
+    try:
+        prediction, ultimo_preco, variacao = make_prediction()
+        
+        if prediction is None:
+            raise ValueError('Erro ao fazer previsão')
+        
+        # Registrar previsão no monitor
+        prediction_data = {
+            'prediction': prediction,
+            'timestamp': datetime.now(),
+            'latency': time.time() - request.start_time,
+            'memory_usage': psutil.Process().memory_info().rss,
+            'cpu_usage': psutil.cpu_percent()
+        }
+        model_monitor.log_prediction(prediction_data)
+        
+        return jsonify({
+            'prediction': f"${prediction:.2f}",
+            'ultimo_preco': f"${ultimo_preco:.2f}",
+            'variacao': f"{variacao:.2f}%"
+        })
+        
+    except Exception as e:
+        logger.error(f"Erro ao fazer previsão: {str(e)}")
         return jsonify({'error': str(e)}), 400
 
 @app.route('/treinamentomodelo')
+@monitor_endpoint
 def painel_treinamento():
-    """Renderiza o painel de treinamento"""
+    """Renderizar o painel de treinamento"""
     return render_template('treinamento_modelo.html')
 
 @app.route('/treinamentomodelo/treinar', methods=['POST'])
+@monitor_endpoint
 @swag_from({
     'tags': ['treinamento'],
-    'summary': 'Inicia treinamento do modelo',
-    'description': 'Inicia um novo processo de treinamento do modelo LSTM',
-    'responses': {
-        200: {
-            'description': 'Treinamento iniciado com sucesso'
-        },
-        400: {
-            'description': 'Já existe um treinamento em andamento'
-        }
-    }
+    'summary': 'Inicia treinamento do modelo'
 })
 def treinar_modelo():
     global training_status
@@ -261,73 +269,35 @@ def treinar_modelo():
     if training_status["is_running"]:
         return jsonify({
             "status": "erro",
-            "message": "Já existe um treinamento em andamento",
-            "start_time": training_status["start_time"]
+            "message": "Já existe um treinamento em andamento"
         }), 400
     
-    training_status = {
-        "is_running": False,
-        "start_time": None,
-        "end_time": None,
-        "run_id": None,
-        "error": None,
-        "metrics": None
-    }
-    
-    thread = threading.Thread(target=execute_model_training)
-    thread.start()
-    
-    return jsonify({
-        "status": "iniciado",
-        "message": "Treinamento iniciado com sucesso",
-        "start_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    })
-
-@app.route('/treinamentomodelo/status', methods=['GET'])
-@swag_from({
-    'tags': ['treinamento'],
-    'summary': 'Obtém status do treinamento',
-    'description': 'Retorna o status atual do processo de treinamento',
-    'responses': {
-        200: {
-            'description': 'Status obtido com sucesso'
-        }
-    }
-})
-def obter_status_treinamento():
-    status_data = training_status.copy()
-    
-    # Se o treinamento foi concluído e o arquivo existe, adiciona o gráfico
-    if not status_data["is_running"] and status_data["end_time"] and os.path.exists('previsoes_completas.png'):
-        with open('previsoes_completas.png', 'rb') as f:
-            graph_data = base64.b64encode(f.read()).decode()
-            status_data['graph'] = graph_data
-    else:
-        status_data['graph'] = None
+    try:
+        thread = threading.Thread(target=execute_model_training)
+        thread.start()
         
-    return jsonify(status_data)
+        return jsonify({
+            "status": "iniciado",
+            "message": "Treinamento iniciado com sucesso",
+            "start_time": datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+    except Exception as e:
+        logger.error(f"Erro ao iniciar treinamento: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
-@app.route('/treinamentomodelo/saude', methods=['GET'])
-@swag_from({
-    'tags': ['treinamento'],
-    'summary': 'Verifica saúde da API',
-    'description': 'Verifica se a API está funcionando corretamente',
-    'responses': {
-        200: {
-            'description': 'API está saudável'
-        }
-    }
-})
-def verificar_saude():
-    return jsonify({
-        "status": "saudavel",
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    })
+# Iniciar servidor de métricas do Prometheus
+def start_metrics_server():
+    start_http_server(8000)
+    logger.info("Servidor de métricas iniciado na porta 8000")
 
 if __name__ == '__main__':
-    # Certifique-se de que a pasta que você quer zipar existe
+    # Iniciar servidor de métricas em thread separada
+    metrics_thread = threading.Thread(target=start_metrics_server, daemon=True)
+    metrics_thread.start()
+    
+    # Certificar-se de que a pasta que você quer zipar existe
     if not os.path.exists(FOLDER_TO_ZIP):
         os.makedirs(FOLDER_TO_ZIP)
-        with open(os.path.join(FOLDER_TO_ZIP, "exemplo.txt"), "w") as f:
-            f.write("Este é um exemplo de arquivo.")
-    app.run(host='0.0.0.0', port=5000, debug=False)    
+    
+    # Iniciar aplicação Flask
+    app.run(host='0.0.0.0', port=5000, debug=False)
